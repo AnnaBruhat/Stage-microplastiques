@@ -1,0 +1,665 @@
+INTRODUCTION
+Texte rédigé par Anna Bruhat
+Les explications du tutoriel sont sous forme de texte, les commentaires sont entre parenthèses, les exemples sont donnés entre crochets, et le code est en gris.
+Ce tutoriel en français se base entièrement sur le tutoriel de la pipeline originale de dada2 (version 1.16) disponible ici : https://benjjneb.github.io/dada2/tutorial.html
+La documentation des fonctions utilisées est disponible ici : https://www.bioconductor.org/packages/devel/bioc/manuals/dada2/man/dada2.pdf
+A la fin de ce tutoriel, il sera obtenu une table d'ASV (amplicon sequence variant) qui permet de visualiser combien de fois une ASV apparait dans chaque échantillon, ainsi qu’une taxonomie assignée à chaque ASV jusqu’au genre ou à l’espèce.
+Le point de départ est un ensemble de fichiers ".fastq" séquencés par la méthode Illumina (https://www.illumina.com/documents/products/techspotlights/techspotlight_sequencing.pdf) contenant chacun les séquençages d'un échantillon en forward ou en reverse. [Par exemple, l'échantillon AAA est séparé en deux fichiers : AAA_R1.fastq.gz contenant les reads forward et AAA_R2.fastq.gz contenant les reads reverse.]
+S’il y a plusieurs fichiers pour les forward et plusieurs fichiers pour les reverse d'un échantillon, il faut tout d'abord concaténer les forward entre eux et les reverse entre eux. De plus, il faut s’assurer que les primers ont été enlevés. S’ils ne l’ont pas été, pas de panique, ils pourront être coupés plus tard.
+Il est conseillé de lancer les lignes depuis un rmarkdown pour visualiser directement les sortis de chacunes (File -> New File -> R markdown). Chaque nouvelle ligne de code doit être dans un nouveau chunk :
+[
+```{r}
+#ceci est un nouveau chunk
+#avec un nouveau code à exécuter en cliquant sur la flèche verte ou en faisant ctrl + entrée
+#voilà !
+```
+]
+Les annotations peuvent se faire avec des # dans les chunks, et sans rien de plus entre chaque.
+Il est conseillé de copier le code dans un Rscript pour garder une trace de l'ordre de vos lignes ainsi qu'ajouter des commentaires avec les "#".
+Dans le code, beaucoup de fonctions prennent comme argument « multithreads ». Cela permet d’allouer plus de cœurs à la fonction, pour qu’elle travaille plus vite. Il est conseillé de mettre = FALSE sur Windows, et = TRUE sur MacOS. (personnellement sur Windows j’ai pu exécuter le programme plus rapidement en mettant tout de même = TRUE)
+CHAPITRE 1 : Préparer son espace de travail.
+Les séquences doivent être mises dans un fichier nommé "seq". Elles sont normalement divisées en deux fichiers par échantillon, un pour les reads forward et un pour les reads reverse, sous format "fastq" ou "fastq.gz" (l'extension n'a pas d'importance car RStudio peut lire un fichier zippé. Il faut cependant s'assurer que les chemins d'accès précisent aussi cette extension en ".gz" tout au long du code ! Pour la fluidité du code présent dans ce tutoriel, il sera utilisé l'extension .gz).
+Une fois RStudio ouvert, il faut cliquer sur Session en haut à gauche, Set Working Directory, puis Choose Directory. On sélectionne  chemin de travail où R pourra aller chercher tout ce dont il a besoin pour mener à bien les lignes de codes que nous allons lui demander d'exécuter. Le fichier choisi doit être celui juste au-dessus de "seq" dans l'arborescence. [ex : Le travail est sur le disque D de l’ordinateur, les séquences se trouvent dans le fichier seq, qui lui-même se trouve dans le fichier DADA2, il sera obtenu dans la console : setwd("D:/DADA2")]
+Pour permettre à RStudio de connaitre toutes les fonctions à exécuter par la suite, il faut charger tous les packages nécessaires : 
+required_CRAN_packages = c("BiocManager","stringr")
+for(CRAN_package in required_CRAN_packages){
+  if (!require(CRAN_package, character.only=TRUE)) {
+    install.packages(CRAN_package)
+    library(CRAN_package,character.only = TRUE)
+  } else {
+    library(CRAN_package,character.only = TRUE)
+  }
+}
+required_bioconductor_packages = c("BiocStyle")
+for(bioc_package in required_bioconductor_packages) {
+  if (!require(bioc_package, character.only=TRUE)) {
+    BiocManager::install(bioc_package)
+    library(bioc_package,character.only = TRUE)
+  } else {
+    library(bioc_package,character.only = TRUE)
+  }
+}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("multtest")
+BiocManager::install("phyloseq")
+if (!requireNamespace("devtools", quietly = TRUE))
+      install.packages('devtools')
+Liste des packages nécessaires pour dada2 ainsi que l’analyse d’α et β-diversité :
+ 
+library(glue)
+library(Rccp)
+library(stats)
+library(dada2)
+library(Biocstyle)
+library(knitr)
+library(rmarkdown)
+library(xfun) 
+library(ape)
+library(dplyr)
+library(plyr)
+library(phyloseq)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(devtools)
+library(remotes)
+library(ranacapa)
+library(fantaxtic)
+library(vegan)
+library(microbiome)
+library(dendextend)
+library(ggforce)    
+library(ggdendro)
+library(ggtree)
+library(plotly)
+library(patchwork)
+library(agricolae)
+library(FSA)
+library(rcompanion)
+library(rstatix) #pour la fonction kruskal_test
+library(FSA)
+library(cluster)
+library(pairwiseAdonis) 
+library(eulerr)
+library(randomcoloR)
+library(ggVennDiagram)
+library(VennDiagram)
+library(UpSetR)
+library(pairwiseAdonis)
+library(MicEco) #pour la fonction ps_venn
+library(factoextra)
+remotes::install_github("Russel88/MicEco")
+library(reshape2)
+ 
+S’il y a besoin d’installer un de ces packages :
+install.packages("dada2")
+install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+
+CHAPITRE 2 : Travail sur vos données
+RStudio sait qu'il doit travailler depuis le dossier DADA2, mais il ne sait pas encore que les séquences se trouvent dans le dossier seq qui est dans DADA2... Il faut lui dire en assignant ( <- ) un chemin d'accès à une variable qui sera nommée ici "path_to_fastqs".
+```{r}
+path_to_fastqs <- "D:/DADA2/seq"
+```
+C'est toujours mieux de vérifier le fichier source de travail, et qu'il contient ce qu'on veut. Pour cela, il peut être utiliser la fonction list.files. Il ne faut pas hésiter à utiliser cette fonction dès que le doute de l’emplacement de travail ou de ce qu’il contient apparait.
+```{r}
+list.files(path_to_fastqs)
+```
+Il est assigné à la variable fnFs tous les fichiers contenus dans seq qui finissent par _R1.fastq.gz. « full.names = TRUE » permet d'assigner à la variable le chemin complet de chaque fichier, et non pas seulement leurs noms. [ex : le fichier AAA sera assigné à fnFs par "D:/DADA2/seq/AAA_R1.fastq.gz", et non pas seulement par "AAA_R1.fastq.gz"]
+```{r}
+fnFs <- sort(list.files(path_to_fastqs,
+                        pattern = "_R1.fastq.gz",
+                        full.names = TRUE))
+fnFs #permet de visualiser ce que contient la variable fnFs
+```
+Il est assigné à la variable fnRs tous les fichiers contenus dans seq qui finissent par _R2.fastq.gz
+```{r}
+fnRs <- sort(list.files(path_to_fastqs,
+                        pattern = "R2_fastq.gz",
+                        full.names = TRUE))
+```
+On divise la chaîne de caractères selon "_", cela permet de vérifier que nos noms d'échantillons sont corrects [Cette commande affichera "AAA"]
+```{r}
+sample.names <- basename(fnFs) |>
+  strsplit(split = "_") |> 
+  sapply(head, 1) # appliquer une fonction à chaque éléments d'une liste
+sample.names
+```
+Maintenant, les quality profile de nos séquences forward (R1) vont être montrés. Cela permettra de voir le Quality Score (QS) par la ligne verte, qui est un indicateur de "chance" d'avoir séquencé une mauvaise base à un nucléotide donné. [un QS = 30 signifie qu'on a 1/1000 chance d'avoir une mauvaise nucléotide, QS = 20 -> 1/100, QS = 10 -> 1/10 ... ]
+```{r}
+plotQualityProfile(fnFs)
+```
+Même chose pour les séquences reverse.
+```{r}
+plotQualityProfile(fnRs)
+```
+La ligne orange montre les quartiles de la distribution du QS. En gris, c'est une heat map de la fréquence de chaque QS pour chaque position de nucléotide.  
+La plupart du temps, les forward sont de meilleure qualité que les reverse. 
+Une fois les Quality Profile présentés, il peut être décidé de ce qu’il sera coupé des séquences. Ce qui est conseillé, c'est de couper ce qui est en dessous d'un QS = 30. Donc si les reads de 250 paires de base (pb) passent à un QS<30 à partir de 230 pb, il faudra couper 20 pb. Attention, il faut être sûr'es que les séquences forward et reverse auront toujours assez de pb pour se fusionner par la suite (overlap)! De plus, il faut faire attention à prendre en compte la présence ou non des primers.
+Une fois la taille des séquences connue, elles vont être coupées et filtrées en fonction de plusieurs paramètres. Avant cela, il faut créer la direction dans laquelle ces nouvelles séquences se mettront.
+```{r}
+filtFs <- file.path(path_to_fastqs, "filtered", paste0(sample.names, "_R1_concatenated_filt.fastq"))
+filtRs <- file.path(path_to_fastqs, "filtered", paste0(sample.names, "_R2_concatenated_filt.fastq"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+La fonction filterAndTrim, qui prend beaucoup de paramètres en arguments, va pouvoir être utilisée pour couper les séquences. Les arguments utilisés sont les suivants :
+-	trimleft : permet de couper à gauche des séquences, c’est-à-dire les primers s’ils sont toujours sur nos séquences.
+-	truncLen : permet de décider les pb restantes, en fonction du QS.
+-	maxN : permet de donner le maximum de nucléotides indéterminés qui seront acceptés pendant le filtrage. DADA2 ne permet aucun N, donc par default sera toujours de 0. 
+-	maxEE : permet de donner un nombre d’erreurs attendues maximal à partir duquel les reads seront écartés. : Les erreurs attendues sont calculées à partir de la définition nominale du score de qualité : EE = somme(10^(-Q/10)).
+-	truncQ : permet un trie direct sur les reads qui ont un QS en dessous du chiffre donné, par défaut = 2
+-	rm.phix : permet de filtrer les séquences qui correspondent au génome du phage PhiX, souvent utilisé comme contrôle de séquençage. 
+-	Compress : permet de réduire la taille prise par le résultat de la fonction
+-	Multithread : permet de donner l’autorisation à R d’utiliser plusieurs cœurs / processeurs pour pouvoir résoudre le code plus rapidement. Cependant cela n’est pas si simple et est machine dépendant. Il est conseillé de garder = FALSE pour Windows, mais pour certaines fonctions comme removeBimerasDenovo cela accelère grandement le processus.
+Le « c(,) » permet de préciser que sur les forward, à gauche de la virgule, il sera laissé 230 pb, et pour les reverse, à droite de la virgule, il sera laisser 200 pb.
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, trimleft=c(20,20), truncLen=c(230,200),
+                     maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+                     compress=TRUE, multithread=FALSE) 
+head(out)
+```
+Chaque jeu de données d’amplicons à un ensemble différent de taux d’erreur. C’est-à-dire des estimations de la probabilité d’erreurs lors du processus de séquençage. Dada2 va donc utiliser un modèle d’erreur paramétrique pour représenter ces taux d’erreurs. La fonction learnErrors apprend ce modèle d’erreur à partir des données. Elle le fait en alternant entre l’estimation des taux d’erreurs et l’interférence de la composition de l’échantillon, c’est-à-dire la nature des séquences d’ADN présentes, jusqu’à ce qu’ils convergent vers une solution cohérente. Pour pouvoir faire tout cela, l’algorithme a besoin d’une supposition initiale. Ici, il va utiliser les taux d’erreurs les plus élevés possibles dans les données. Ces taux d’erreurs représentent ce qui se produirait si seule la séquence d’ADN la plus abondante était correcte, et toutes les autres considérées comme des erreurs. L’algorithme chercher donc à converger vers une meilleure représentation des taux d’erreurs réels dans les données.
+Le modèle d’erreur va être appris à partir des séquences forward.
+```{r}
+errF <- learnErrors(filtFs, multithread=FALSE)
+```
+Visualisation du graphique. 
+Si ces chunks sont relancés une énième fois pour tester des données de taille différentes ou des paramètres différents, mais que la bonne qualité et l’utilisation possible des séquences sont déjà connues, ploter les erreurs n’est pas systématiquement nécessaire. 
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+```
+Le modèle d’erreur va être appris à partir des séquences reverse.
+ ```{r}
+errR <- learnErrors(filtRs, multithread = FALSE)
+```
+Visualisation du graphique.
+```{r}
+plotErrors(errR, nominalQ=TRUE)
+```
+Ce qui est obtenu sur les graphiques sont les probabilités d’avoir telle nucléotide remplacée par telle autre. Les points représentent les taux d’erreur observés pour chaque QS. La ligne rouge montre les taux d’erreur attendus selon la définition nominale du QS. La ligne noire représente les taux d’erreur estimés par rapport à nos échantillons. Il peut être vérifié que cela correspond bien pour avancer sur le travail.
+La fonction dada permet d’éliminer toutes les erreurs de séquençage, en se basant sur le modèle d’erreur qui vient de d’être appris par l’algorithme.
+Cette fonction est appliquée sur les reads forward puis les reverse. La dernière ligne retournera donc l’information de combien de variants uniques ont été décelés dans les séquences forward de l’échantillon 1. 
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=FALSE)
+dadaRs <- dada(filtRs, err=errR, multithread=FALSE)
+dadaFs[[1]]
+```
+Les séquences ainsi trimées et filtrées sont fusionnées.
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+head(mergers[[1]])
+```
+On crée un tableur avec ces séquences mergées et on donne sa dimensions pour voir combien on en a.
+Un tableur contenant ces séquences mergées est créé et assigné à l’objet seqtab. Sa dimension est sortie. [78 444974, cela signifie 78 lignes, donc 78 échantillons, et 444 974 colonnes, donc ASVs.
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+Table(nchar()) permet de retourner la répartition des longueurs de séquences. Les tailles sont sur la première ligne. Le nombre de séquences aillant ces tailles est sur la deuxième.
+```{r}
+table(nchar(getSequences(seqtab)))
+```
+Les chimères sont enlevées du tableur par removeBimeraDenovo. Cette fonction permet d’enlever les séquences qui sont possiblement faussement séquencées, et donc faussement comptabilisées comme des ASV. Ce nouveau tableur sans les chimères est assigné à l’objet seqtab.nochim. Sa dimension donnera donc le même nombre de lignes, mais moins de colonne. [78 42953, toujours 78 échantillons mais beaucoup moins d’ASV : 42 953.]
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=FALSE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+Il est calculé le pourcentage de chimères qui ont été enlevées. [19.4829, presque 20% de chimères, c’est beaucoup.]
+```{r}
+(1-sum(seqtab.nochim)/sum(seqtab))*100
+```
+Pour avoir le nombre de reads qui ont été importés par échantillons, ainsi que le nombre de reads à chaque étape, un « track » peut être sorti sous forme de tableaux excels.
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, getN(dadaFs), getN(dadaRs), getN(mergers), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+write.csv(track, file="track.csv")
+```
+CHAPITRE 4 : assigner la taxonomie et exporter les tableurs finaux.
+Il est temps d’assigner la taxonomie à chaque ASV de notre tableur. Les données peuvent être trop grosses et dans ce cas, il faut séparer le tableur en plusieurs petits tableurs et assigner un par un la taxonomie.
+Tout d’abord, il faut retrouver la dimension de seqtab.nochim. Ensuite, ce tableur doit être séparé en plusieurs tableurs. Ici, des sous-objets de 10 000 ASV sont formés dans des « subset ».
+```{r}
+dim(seqtab.nochim)
+subset1 <- seqtab.nochim[,1:10000]
+subset2 <- seqtab.nochim[,10001:20000]
+subset3 <- seqtab.nochim[,20001:30000]
+subset4 <- seqtab.nochim[,30001:40000]
+subset5 <- seqtab.nochim[,40001:42953]
+```
+Ensuite, il va falloir associer la taxonomie à partir de la base de donnée choisie. Ici, ce sera Silva 138 disponible ici : https://zenodo.org/records/4587955 
+Les fichiers zip doivent être téléchargés et mis dans le dossier de travail.
+La fonction assignTaxonomy prend en argument les petits tableurs d’ASV, puis la base de donnée à utiliser pour faire l’assignation. L’argument tryRC = TRUE signifie que la fonction lira les séquences d’ASV dans un sens puis dans l’autre (Reverse Complement). Cela est utile si les séquences ne sont pas assurément en forward ou reverse). Chaque petit tableur est ensuite enregistré en objet R avec la fonction save.
+```{r}
+taxa1 <- assignTaxonomy(subset1, "silva_nr99_v138.1_train_set.fa.gz", tryRC=TRUE, multithread=TRUE)
+taxa1 <- addSpecies(taxa1, "silva_species_assignment_v138.1.fa.gz", tryRC=TRUE)
+save(taxa1, file="taxa1.RData")
+taxa2 <- assignTaxonomy(subset2, "silva_nr99_v138.1_train_set.fa.gz", tryRC=TRUE, multithread=TRUE)
+taxa2 <- addSpecies(taxa2, "silva_species_assignment_v138.1.fa.gz", tryRC=TRUE)
+save(taxa2, file="taxa2.RData")
+taxa3 <- assignTaxonomy(subset3, "silva_nr99_v138.1_train_set.fa.gz", tryRC=TRUE, multithread=TRUE)
+taxa3 <- addSpecies(taxa3, "silva_species_assignment_v138.1.fa.gz", tryRC=TRUE)
+save(taxa3, file="taxa3.RData")
+taxa4 <- assignTaxonomy(subset4, "silva_nr99_v138.1_train_set.fa.gz", tryRC=TRUE, multithread=TRUE)
+taxa4 <- addSpecies(taxa4, "silva_species_assignment_v138.1.fa.gz", tryRC=TRUE)
+save(taxa4, file="taxa4.RData")
+taxa5 <- assignTaxonomy(subset5, "silva_nr99_v138.1_train_set.fa.gz", tryRC=TRUE, multithread=TRUE)
+taxa5 <- addSpecies(taxa5, "silva_species_assignment_v138.1.fa.gz", tryRC=TRUE)
+save(taxa5, file="taxa5.RData")
+```
+Chacun de ces petits tableurs va être regroupé pour ne former plus qu’un seul grand tableur d’ASV. 
+```{r}
+taxa.print1 <- rbind(taxa1,taxa2)
+save(taxa.print1, file="taxa.print1.RData")
+taxa.print2 <- rbind(taxa.print1, taxa3)
+save(taxa.print2, file="taxa.print2.RData")
+taxa.print3 <- rbind(taxa.print2, taxa4)
+save(taxa.print3, file="taxa.print3.RData")
+taxa.print4 <- rbind(taxa.print3, taxa5)
+save(taxa.print4, file="taxa.print4.RData")
+```
+Le dernier objet correspond donc à la taxonomie assignée à chaque séquence d’ASV. Il faut maintenant exporter la table d’abondance, la taxonomie, et la table d’ASV qui fusionnera les deux.
+```{r}
+write.table(taxa.print4, "taxofinale.csv", sep="\t") #exporter la table de taxonomie
+
+final_asv_table = data.frame(t(seqtab.nochim))
+write.table(final_asv_table,"ASV_TABLE.csv", sep="\t") #exporter la table d’abondance
+
+final_asv_table = merge(final_asv_table, taxa.print4, by.x="row.names", by.y="row.names") 
+#fusionner les deux de façon à ce que chaque ASV ait bien la bonne ligne d’abondance et la bonne taxonomie
+
+names(final_asv_table)[names(final_asv_table) == 'Row.names'] = 'sequence'
+write.table(final_asv_table, "ASVtable.csv", col.names=NA, row.names=T, quote=F, sep="\t", dec=",") 
+```
+Ce qui est nommé ici ASVtable correspond à un tableur contenant les ASV en lignes, avec leur séquence et leur taxonomie, les échantillons en colonne ainsi que l’abondance de chaque ASV dans chaque échantillon.
+
+Si l’assignation ne prend pas trop de place et que R veut bien l’exécuter, il suffit de faire le code suivant :
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "D:/stageDD/DADA2/silva_nr99_v138.1_train_set.fa.gz", multithread=FALSE)
+```
+```{r}
+taxa <- addSpecies(taxa, "D:/stageDD/DADA2/silva_species_assignment_v138.1.fa.gz")
+```
+On lie les noms des lignes qui étaient des chiffres aux noms des ASV trouvées dans le tableau d'ASV.
+```{r}
+taxa.print <- taxa
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+Les tableurs sont exportés.
+```{r}
+write.table(taxa, "taxofinale.csv", sep="\t")
+
+final_asv_table = data.frame(t(seqtab.nochim))
+write.table(final_asv_table,"Abundfinale.csv", sep="\t")
+
+final_asv_table = merge(final_asv_table, taxa, by.x="row.names", by.y="row.names")
+names(final_asv_table)[names(final_asv_table) == 'Row.names'] = 'sequence'
+write.table(final_asv_table, "ASVtable.csv", col.names=NA, row.names=T, quote=F, sep="\t", dec=",")
+```
+Il est maintenant temps de nettoyer et resampler cette table d’ASV.
+CHAPITRE 5 : Nettoyage 
+Pour faire le nettoyage de la table d’ASV, il faut importer les tableurs en les assignant à des nouveaux objets. Tout d’abord, la table de metadata est assignée à l’objet metadata. Le nom de l’objet n’a pas d’importance, la table de metadata pourrait être assignée à l’objet vivelesmouettes que ça ne changerait rien. Ensuite la table d’ASV contenant l’abondance de chaque ASV par échantillon, ainsi que les séquences et l’assignation taxonomique de chacune est assignée à l’objet taxasv
+```{r}
+metadata <- read.csv("metadata.csv", header=TRUE, sep=",")
+taxasv <- read.csv("ASVtable.csv", header=TRUE, sep=",")
+```
+Il est ajouté devant le numéro de chaque ASV les deux lettres « sp » :
+```{r}
+taxasv$ASV <- paste("sp", taxasv$ASV, sep = "")
+```
+La table de taxonomie (taxo) est alors séparée de la table d’abondance (abondance). Littéralement, le code dit « assigne a l’objet taxo les colonnes (droite de la virgule) suivantes de l’objet taxasv : ASV, Kingdom, Phylum… et leur contenu. Assigne à l’objet abondance l’objet taxasv, puis supprime le contenu des colonnes suivantes « Kingdom, Phylum… »
+
+```{r}
+taxo <- taxasv[,c("ASV","Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species" )]
+abondance <- taxasv
+abondance[,c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "sequence", "Species")] <- NULL
+```
+Pour que les deux tables aient les mêmes noms de lignes, et que les noms des échantillons soient cohérents entre la table de metadata et la table d’abondance, il faut faire les lignes de code suivantes (le signe $ permet de préciser une colonne). [Ici les noms de lignes de l’objet taxo doivent prendre les noms de lignes contenu dans la colonne ASV de l’objet taxo. La colonne ASV se retrouve alors dédoublée dans l’objet taxo, il faut alors la supprimer ( NULL). La même chose se produit pour l’objet abondance. L’objet metadata se voit assigner des noms de lignes correspondant aux noms d’échantillons contenus dans la colonne NOM du même objet. Cette colonne restant intéressante à garder dans l’objet n’est pas supprimée. Les objets taxo et abondance se retrouvent alors avec des noms de lignes correspondant à sp1, sp2, sp3 etc]
+```{r}
+rownames(taxo) <- taxo$ASV
+taxo$ASV <- NULL
+rownames(abondance) <- abondance$ASV
+abondance$ASV <- NULL
+rownames(metadata) <- metadata$NOM
+```
+Il est temps de créer un objet phyloseq contenant nos datas. (https://joey711.github.io/phyloseq/) (https://github.com/joey711/phyloseq). 
+Phyloseq est une façon d’utiliser des données sous forme d’un gros objet pouvant contenir une table d’abondance (otu_table), une table de taxonomie (tax_table), une table de metadata (sample_data), un arbre phylogénétique (phy_tree) ainsi que des reference de sequences (refseq). Ici sera utilisé simplement otu_table, tax_table et sample_data.
+Les deux objets taxo et abondance doivent être transformés en matrices afin de créer un objet phyloseq
+```{r}
+taxo_mat <- as.matrix(taxo)
+abondance_mat <- as.matrix(abondance)
+
+taxo_plsq <- tax_table(taxo_mat)
+abondance_plsq <- otu_table(abondance_mat, taxa_are_rows = TRUE)
+metadata_plsq <- sample_data(metadata)
+```
+Création de l’objet phyloseq.
+```{r}
+phyloseq1 <- phyloseq(taxo_plsq, abondance_plsq, metadata_plsq)
+phyloseq1
+```
+Maintenant, la table d’abondance et la table de taxonomie vont être nettoyées des non-bactéries, des chloroplastes, des non assignés… Ici, c’est à l’utilisateur de choisir ce qu’il ou elle veut enlever / garder. [le code dit littéralement garde dans l’objet phyloseq1 tous les sous-objets ayant le mot « bacteria » dans sa colonne Kingdom, et ainsi de suite. == pour quand ça doit être ce qu’il y a écrit ensuite, et != pour quand ce qui veut être gardé est différent de ce qui est précisé ensuite.] Ici, l’objet phyloseq est remontré à chaque étape pour que le nombre d’ASV enlevé de la table soit vu.
+```{r}
+phyloseq1 <- subset_taxa(phyloseq1, Kingdom =="Bacteria")
+phyloseq1
+phyloseq1 <- subset_taxa(phyloseq1, Order!="Chloroplast")
+phyloseq1
+phyloseq1 <- subset_taxa(phyloseq1, Phylum!="NA")
+phyloseq1
+phyloseq1 <- subset_taxa(phyloseq1, Family!="Mitochondria")
+phyloseq1
+```
+Une fois la table d’abondance nettoyée, il va falloir la resampler. Pour cela, il faut tout d’abord connaitre le nombre de read minimal dans les échantillons. Le code suivant permet de calculer le total de read contenu dans chaque échantillon et de sortir un tableur Excel pour vérifier ces chiffres et ainsi décider de la profondeur d’échantillonnage pour le resampling. Le tableur sorti n’est peut être pas classé en ordre croissant de nombre de reads, il faut donc penser à le faire pour ne pas prendre par erreur un nombre de reads dans un échantillon qui n’était pas le plus bas.
+```{r}
+ab <- otu_table(phyloseq1)
+ab_tot <- colSums(ab)
+nom <- sample_names(phyloseq1)
+mat <- cbind(nom,ab_tot)
+tout <- data.frame(mat)
+write.csv(tout,file="abondance_totale.csv")
+```
+Une autre façon de visualiser le nombre de reads par échantillon et de ploter la courbe de rarefaction. 
+```{r}
+p <- ggrare(phyloseq1, step = 10, plot = TRUE, se = FALSE)
+ggplotly(p)
+```
+Ensuite, le resampling peut se faire par la fonction rarefy_even_depth qui prend en argument l’objet phyloseq, le nombre de reads attendus par échantillon, ainsi que 
+```{r}
+phyloseq_norm <- rarefy_even_depth(phyloseq1, 26530, rngseed = 711) 
+phyloseq_norm
+phyloseq_norm <- prune_taxa(taxa_sums(phyloseq_norm)>0, phyloseq_norm)
+```
+Enfin, chacun des fichiers normalisé est enregistré sous sa bonne forme finale.
+```{r}
+phyloseq_norm_ASV_df <- data.frame(otu_table(phyloseq_norm))
+phyloseq_norm_taxo_df <- data.frame(tax_table(phyloseq_norm))
+sequences <- data.frame(taxasv$sequence)
+rownames(sequences) <- taxasv$ASV
+ASV_norm <- rownames(phyloseq_norm_ASV_df)
+seq_norm <- data.frame(sequences[c(which(rownames(sequences) %in% ASV_norm)),])
+colnames(seq_norm) <- "sequence"
+phyloseq_norm_df <- cbind(phyloseq_norm_ASV_df, phyloseq_norm_taxo_df, seq_norm$sequence)
+
+write.csv(phyloseq_norm_ASV_df, file = "table_ASV_norm.csv", row.names = TRUE, quote= FALSE)
+write.csv(phyloseq_norm_taxo_df, file = "table_taxo_norm.csv", row.names = TRUE, quote= FALSE)
+write.csv(phyloseq_norm_df, file = "table_totale_norm.csv", row.names = TRUE, quote= FALSE)
+```
+
+Une fois cet objet phyloseq créé ainsi que les fichiers excels contenant toutes les données normalisées et nettoyées, il peut être possible d’analyser l’α-diversité, la β-diversité et de créer des figures.
+
+metadata <- read.csv("metadata.csv", header=TRUE, sep=",")
+taxasv <- read.csv("Taxo_norm.csv", header=TRUE, sep=",")
+abondance <- read.csv("table_ASV_norm.csv", header = TRUE, sep = ",")
+
+Il faut renommer les lignes et les colonnes des fichiers pour que tout corresponde bien. Les noms après les « $ » sont à remplacer avec ce qui est nécessaire et ce qui intéresse l’utilisateur.
+rownames(taxasv) <- taxasv$ASV
+taxasv$ASV <- NULL
+taxasv$Jeff <- NULL
+
+rownames(abondance) <- abondanceWTS01$CODE
+abondance$CODE <- NULL
+colnames(abondance) <- metadata$TYPE_STATION_CODE
+
+rownames(metadata) <- metadata$TYPE_STATION_CODE
+
+Il faut de nouveau rendre ces fichiers lisibles pour un objet phyloseq.
+taxo_mat <- as.matrix(taxasv)
+abondance_mat <- as.matrix(abondance)
+
+Et ainsi créer un objet phyloseq final sur lequel il sera possible de travailler.
+taxo_plsq <- phyloseq::tax_table(taxo_mat)
+abondance_plsq <- otu_table(abondance_mat, taxa_are_rows = TRUE)
+metadata_plsq <- sample_data(metadata)
+phyloseq1 <- phyloseq(taxo_plsq, abondance_plsq, metadata_plsq)
+phyloseq1
+
+Pour calculer l’α-diversité :
+alpha_diversite <- estimate_richness(phyloseq1, measures = c("Observed", "Chao1", "Shannon", "InvSimpson", "Simpson"))
+alpha_diversite <- round(alpha_diversite,1)
+alpha_diversite
+J <- alpha_diversite$Shannon/log(alpha_diversite$Observed)
+J <- round(J, 3)
+J
+alpha_diversite <- cbind(alpha_diversite, J)
+alpha_diversite
+capture.output(alpha_diversite, file = "alpha_diversite.csv")
+
+Calculer l’α-diversité en fonction d’un paramètre, par exemple le protocole
+alpha_diversite2 <- read.csv("alpha_diversite_real.csv", header = TRUE, sep=";")
+alpha_diversite2 <- cbind(alpha_diversite, "PROTOCOLE_SOUSPROTOCOLE"=metadataWTS01$PROTOCOLE_SOUSPROTOCOLE)
+alpha_diversite2$PROTOCOLE_SOUSPROTOCOLE <-
+  factor(as.factor(alpha_diversite2$PROTOCOLE_SOUSPROTOCOLE),
+         levels = c("S300_S300", "SS_02", "SS_3", "SML_02", "SML_3"))
+
+kao1 <- ggplot(alpha_diversite2, aes(x=PROTOCOLE_SOUSPROTOCOLE, y=Chao1)) + 
+  geom_boxplot() + 
+  facet_wrap(vars("Chao1"), nrow=1) +
+  geom_point(aes(color=PROTOCOLE_SOUSPROTOCOLE)) +
+  scale_colour_manual(values = c("#000080","#2E8B57","#FF4500","#FFD700","#32CD32")) +
+  theme_bw()
+kao1
+
+pielou <- ggplot(alpha_diversite2, aes(x=PROTOCOLE_SOUSPROTOCOLE, y=J)) + 
+  geom_boxplot() + 
+  facet_wrap(vars("J"), nrow=1) +
+  geom_point(aes(color=PROTOCOLE_SOUSPROTOCOLE)) +
+  scale_colour_manual(values = c("#000080","#2E8B57","#FF4500","#FFD700","#32CD32")) +
+  theme_bw()
+pielou
+
+Shannon <- ggplot(alpha_diversite2, aes(x=PROTOCOLE_SOUSPROTOCOLE, y=Shannon)) + 
+  geom_boxplot() + 
+  facet_wrap(vars("Shannon"), nrow=1) +
+  geom_point(aes(color=PROTOCOLE_SOUSPROTOCOLE)) +
+  scale_colour_manual(values = c("#000080","#2E8B57","#FF4500","#FFD700","#32CD32")) +
+  theme_bw()
+Shannon 
+
+InvSimpson <- ggplot(alpha_diversite2, aes(x=PROTOCOLE_SOUSPROTOCOLE, y=InvSimpson)) + 
+  geom_boxplot() + 
+  facet_wrap(vars("InvSimpson"), nrow=1) +
+  geom_point(aes(color=PROTOCOLE_SOUSPROTOCOLE)) +
+  scale_colour_manual(values = c("#000080","#2E8B57","#FF4500","#FFD700","#32CD32")) +
+  theme_bw()
+InvSimpson
+
+Simpson <- ggplot(alpha_diversite2, aes(x=PROTOCOLE_SOUSPROTOCOLE, y=Simpson))+
+  geom_boxplot()+
+  facet_wrap(vars("Simpson"), nrow=1)+
+  geom_point(aes(color=PROTOCOLE_SOUSPROTOCOLE))+
+  scale_color_manual(values=c("#000080","#2E8B57","#FF4500","#FFD700","#32CD32")) +
+  theme_bw()
+Simpson
+
+Faire des tests statistiques sur les indices calculé pour voir s’il y a une différence significative entre les indices calculés entre les différents protocoles. Ici, c’est le test de Kruskal-Wallice qui est fait.
+res.kruskal <- kruskal_test(kao1_median.Chao1 ~ PROTOCOLE_SOUSPROTOCOLE, data = chao1csv)
+res.kruskal
+options(max.print = 9999999)
+
+res.kruskal <- kruskal_test(Chao1 ~ ECH, data = alpha_diversite2)
+res.kruskal
+
+Créer un excel qui contient toutes les moyennes, écart-types et médianes de chaque indice calculé, pour chaque catégorie de protocole ici.
+pielou_mean <- data.frame(aggregate(J ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, mean))
+pielou_sd <- data.frame(aggregate(J ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, sd))
+pielou_median <- data.frame(aggregate(J ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, median))
+
+kao1_mean <- data.frame(aggregate(Chao1 ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, mean))
+kao1_sd <- data.frame(aggregate(Chao1 ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, sd))
+kao1_median <- data.frame(aggregate(Chao1 ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, median))
+
+Shannon_mean <- data.frame(aggregate(Shannon ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, mean))
+Shannon_sd <- data.frame(aggregate(Shannon ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, sd))
+Shannon_median <- data.frame(aggregate(Shannon ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, median))
+
+Simpson_mean <-data.frame(aggregate(Simpson ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, mean))
+Simpson_sd <- data.frame(aggregate(Simpson ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, sd))
+Simpson_median <- data.frame(aggregate(Simpson ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, median))
+
+InvSimpson_mean <- data.frame(aggregate(InvSimpson ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, mean))
+InvSimpson_sd <- data.frame(aggregate(InvSimpson ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, sd))
+InvSimpson_median <- data.frame(aggregate(InvSimpson ~ PROTOCOLE_SOUSPROTOCOLE, data = alpha_diversite2, median))
+
+tout <- cbind(pielou_mean, pielou_sd$J, pielou_median$J, kao1_mean$Chao1, kao1_sd$Chao1, kao1_median$Chao1, Shannon_mean$Shannon,
+              Shannon_sd$Shannon, Shannon_median$Shannon, Simpson_mean$Simpson, Simpson_sd$Simpson, Simpson_median$Simpson, InvSimpson_mean$InvSimpson, InvSimpson_sd$InvSimpson, InvSimpson_median$InvSimpson)
+write.csv(tout, "alpha_diversite_protocole.csv")
+
+
+Pour faire une anosim
+phyloseq1_asv <- data.frame(otu_table(phyloseq1))
+phyloseq1_meta <- data.frame(sample_data(phyloseq1))
+phyloseq1_asv <- t(phyloseq1_asv) #??
+bray_toutes <- vegdist(phyloseq1_asv,method="bray") #calculer la distance de bray-curtis
+objet <- phyloseq1_meta$OBJET
+anosim <- anosim(as.matrix(bray_toutes),objet, distance = "bray", permutations = 9999)
+capture.output(anosim, file = "anosim_tous_OBJET.txt")
+
+Pour faire un test pairwise, permanova (calculer s’il existe une différence significative entre plusieurs groupes différents)
+phyloseq1_asv <- data.frame(otu_table(phyloseq1))
+phyloseq1_meta <- data.frame(sample_data(phyloseq1))
+phyloseq1_asv <- t(phyloseq1_asv)
+bray_toutes <- vegdist(phyloseq1_asv,method="bray")
+adonis2(bray_toutes~OBJET,phyloseq1_meta,method=bray)
+options(max.print = 9999999)
+adonis <- pairwise.adonis2(phyloseq1_asv~ OBJET, data=phyloseq1_meta, sim.method=bray, p_adjust_m = holm)
+capture.output(adonis, file = "pairwise_tous_OBJET.txt")
+
+Pour faire une NMDS :
+nmds <- metaMDS(distance_matrix, distance = "bray")
+nmds
+data.scores = data.frame(scores(nmds))
+data.scores$Station = metadataWTS01$STATION
+data.scores$Objet = metadataWTS01$OBJET
+data.scores$Protocole = metadataWTS01$PROTOCOLE
+data.scores$Protocolesousprotocole = metadataWTS01$PROTOCOLE_SOUSPROTOCOLE
+data.scores$Protocolesousprotocole <-
+  factor(as.factor(data.scores$Protocolesousprotocole),
+         levels = c("S300_S300", "SS_02", "SML_02", "SS_3", "SML_3"))
+data.scores$Station <-
+  factor(as.factor(data.scores$Station),
+         levels = c("S01", "S02", "S03", "S04", "S05", "S06", "S07"))
+xx = ggplot(data.scores, aes(x = NMDS1, y = NMDS2)) + 
+  geom_point(aes(colour = Protocolesousprotocole, shape = Protocole), size = 3)+ 
+  labs(x = "NMDS1", colour = "Protocolesousprotocole", y = "NMDS2")  + 
+  scale_colour_manual(values = c("#000080","#2E8B57","#FF4500","#1E90FF","#40E0D0","#808000","#E69F00"))+
+  theme_bw()
+xx
+xx2 = ggplot(data.scores, aes(x = NMDS1, y = NMDS2)) + 
+  geom_point(aes(colour = Station, shape = Protocole))+ 
+  labs(x = "NMDS1", colour = "Fleuve", y = "NMDS2")  + 
+  scale_colour_manual(values = c("#1E90FF","#40E0D0","#808000","#E69F00","#DC143C"))+
+  scale_shape_manual(values = c(3, 4, 19, 17)) + 
+  theme_bw()
+xx2 + facet_wrap(vars(Fleuve), nrow=3)
+
+Faire un dendrogramme
+distance_matrix <- phyloseq::distance(phyloseq1, method = "bray")
+cluster_tree <- hclust(distance_matrix, method = "ward.D2")
+dendrogram <- as.dendrogram(cluster_tree)
+plot(dendrogram, main = "Dendrogramme des echantillons", xlab = "echantillons", ylab = "Distance")
+
+Permet de faire la même chose avec des couleurs, mais l’axe des ordonnées n’est pas satisfaisant.
+dend <-  as.dendrogram(cluster_tree) %>%
+  set("branches_lwd", 1) %>% # Branches line width
+  set("branches_k_color", palette="Dark2", k = 1) %>% # couleur des branches, k = nombre de groupes qu’on veut mettre en évidence
+  set("labels_colors", palette="Dark2", k = 1) %>%  # couleur des labels, k = nombre de groupes qu’on veut mettre en évidence. Donc il est possible de mettre en évidence 5 groupes avec les branches mais de séparer visuellement seulement deux groupes en colorant qu’avec deux couleurs différentes les labels. 
+ set("labels_cex", 0.45) # Change label size
+fviz_dend(dend)
+liste_labels <- labels(dend)
+
+Afficher la liste des labels pour pouvoir les récupérer dans un fichier texte.
+print(liste_labels)
+nom_fichier <- "labels_dendrogramme.txt"
+writeLines(liste_labels, nom_fichier)
+
+Faire une PCOA
+pcoa_bc = ordinate(phyloseq1, "PCoA", "bray") 
+sample_data(phyloseq1)
+pcoa <- plot_ordination(phyloseq1, pcoa_bc, color = "TYPE", shape="PROTOCOLE", title ="PCoA - Bray Curtis") + 
+  geom_point(size = 3) + theme_bw() + scale_color_brewer(palette = "Dark2")
+pcoa
+
+La taxonomie :
+Ce code identifie les n plus abondants ordres puis les n plus abondantes familles dans ces 10 ordres, met tous le reste dans OTHER.
+Ici il est demandé de prendre les 5 classes les plus abondantes avec dans chacune d’elles les 4 ordres le plus abondants.
+top_nested <- nested_top_taxa(phyloseq1,
+                              top_tax_level = "Class",
+                              nested_tax_level = "Family",
+                              n_top_taxa = 5, 
+                              n_nested_taxa = 4)
+
+plot_nested_bar(ps_obj = top_nested$ps_obj,
+                top_level = "Class",
+                nested_level = "Family",
+                relative_abundances = TRUE)
+
+Ce code permet de sortir dans un fichier texte les top 100 ordres dans chaque top 100 classes spécifiquement sur les plastiques. Les chiffres calculés ne prennent donc pas du tout en compte l’eau. Avant cela, il a été créé un objet phyloseq « phyloseqplastique » formé d’une table d’abondance et de metadata contenant uniquement les échantillons plastiques.
+top_nested3 <- nested_top_taxa(phyloseqplastique,
+                              top_tax_level = "Class",
+                              nested_tax_level = "Order",
+                              n_top_taxa = 100,
+                              n_nested_taxa = 100, 
+                              nested_merged_label = "NA and other <tax>")
+toptaxaplastique <- top_nested3$top_taxa %>%
+  mutate(top_abundance = round(top_abundance, 3),
+         nested_abundance = round(nested_abundance, 3)) %>%
+  kable(format = "markdown")
+
+capture.output(toptaxaplastique, file = "toptaxaplastique.txt")
+
+Ce code permet de sortir tous les ordres présents (comptés via excels avec la fonction (NBVAL(UNIQUE…))) et de les grouper en fonction d’une catégorie présente dans la table de metada (ici objet : plastique ou eau) 
+top_grouped <- top_taxa(phyloseq1,
+                        n_taxa = 200,
+                        tax_level = "Order",
+                        grouping = "OBJET")
+top_grouped$top_taxa %>%
+  mutate(abundance = round(abundance, 3)) %>%
+  kable(format = "markdown")
+
+capture.output(top_grouped, file = "topgrouped.txt")
+
+Ce code permet de créer un diagramme de venn.
+ps_venn(phyloseq1, group = "OBJET", fraction = 0, weight = FALSE, plot = TRUE)
+asv_counts <- sapply(phyloseq_venn$PROTOCOLE, function(x) length(intersect(rownames(phyloseq_venn), x)))
+
+Ce code permet d’utiliser des chiffres d’analyse SIMPER pour faire un bubleplot. Chaque type d’objet testé doit être fait un buble plot différent qui sera ensuite regroupé pour faire une figure plus jolie à la fin.
+
+SIMPER<- read.csv("E7C20phylo/SIMPER.csv", header = TRUE)
+SIMPERDATA <- read.csv("E7C20phylo/SIMPERDATA.csv")
+Pour avoir les mêmes noms.
+SIMPER$ECH <- SIMPERDATA$NOMS
+
+Création d’objets séparés pour faire tous les bubles plot voulus, en l’occurrence eau et plastique
+data_PMD <- SIMPER[, c("ABONDANCE_PMD", "ECH")]
+data_PMD$TYPE <- "Plastiques"
+data_PMD$CLASS <- SIMPERDATA$CLASS
+data_PMD$ORDER <- SIMPERDATA$ORDER
+
+data_EAU <- SIMPER[, c("ABONDANCE_EAU", "ECH")]
+data_EAU$TYPE <- "Eau"
+data_EAU$CLASS <- SIMPERwtS01DATA30$CLASS
+data_EAU$ORDER <- SIMPERwtS01DATA30$ORDER
+
+Renommer les colonnes pour avoir un seul nom d'abondance et un seul nom d'axe des abscisses
+colnames(data_PMD) <- c("ABONDANCE", "ECH", "type", "CLASS", "ORDER")
+colnames(data_EAU) <- c("ABONDANCE", "ECH", "type", "CLASS", "ORDER")
+
+Fusionner les deux jeux de données
+combined_data <- rbind(data_PMD, data_EAU)
+
+Tracer le graphique, installation de package contenant des couleurs sympa. Pour scale_color_paletteer_d, se référer au site : https://larmarange.github.io/analyse-R/couleurs.html
+install.packages("paletteer")
+install.packages("ggsci")
+devtools::install_github('awhstin/awtools')
+
+combined_plot <- ggplot(combined_data, aes(x = type, y = ECH, size = ABONDANCE, color = ORDER)) +
+  geom_point(alpha = 0.5) +
+  scale_size_area(max_size = 22, breaks = seq(0, 800, by = 200), limits = c(0, 2000)) +
+  scale_color_paletteer_d("awtools::bpalette", guide = guide_legend(override.aes = list(size = 6))) + 
+  labs(x = "Type", y = "ASV") +
+  theme_minimal()
+
+print(combined_plot)
